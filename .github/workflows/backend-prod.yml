@@ -74,6 +74,7 @@ jobs:
                 service: ${{ env.CLOUD_RUN_SERVICE }}
                 region: ${{ env.CLOUD_RUN_REGION }}
                 image: ${{ env.FULL_IMAGE }}:latest
+                flags: --allow-unauthenticated --port=8080 --memory=512Mi --cpu=1 --min-instances=0 --max-instances=10
 
             - name: Health check
               id: healthcheck
@@ -103,6 +104,7 @@ jobs:
                     --format='value(name)' \
                     --sort-by='~createTime' \
                     --limit=2 | tail -1)
+
 
                 echo "Rolling back to: ${PREV_REVISION}"
 
