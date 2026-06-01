@@ -4,21 +4,11 @@ on:
     push:
         branches:
             - main
-    
-    workflow_dispatch:
-        inputs:
-            image_tag:
-                description: 'Image tag to deploy (for rollback). Leave empty for latest.'
-                required: false
-                default: ''
 
 env:
-    GAR_LOCATION: us-central1
-    GAR_REPOSITORY: backend-images
-    IMAGE_NAME: fastapi-app
-    PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
     CLOUD_RUN_SERVICE: fastapi-backend
     CLOUD_RUN_REGION: us-central1
+    FULL_IMAGE: us-central1-docker.pkg.dev/qwiklabs-gcp-00-717178dcf90e/backend-images/fastapi-app
 
 jobs:
     test:
@@ -39,27 +29,9 @@ jobs:
         name: Build & Push Production Image
         runs-on: ubuntu-latest
         needs: test
-        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.image_tag == '')
-
-        outputs:
-            full_image: ${{ steps.meta.outputs.full_image }}
-            image_tag: ${{ steps.meta.outputs.image_tag }}
 
         steps:
             - uses: actions/checkout@v4
-
-            - name: Generate image metadata
-              id: meta
-              run: |
-                SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
-                IMAGE_TAG="prod-${SHORT_SHA}"
-                FULL_IMAGE="us-central1-docker.pkg.dev/qwiklabs-gcp-00-717178dcf90e/backend-images/fastapi-app:${IMAGE_TAG}"
-                LATEST_IMAGE="us-central1-docker.pkg.dev/qwiklabs-gcp-00-717178dcf90e/backend-images/fastapi-app:latest"
-                echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
-                echo "full_image=${FULL_IMAGE}" >> $GITHUB_OUTPUT
-                echo "latest_image=${LATEST_IMAGE}" >> $GITHUB_OUTPUT
-                echo "Built image tag: ${IMAGE_TAG}"
-                echo "Full image: ${FULL_IMAGE}"
 
             - name: Authenticate to Google Cloud
               uses: google-github-actions/auth@v2
@@ -69,23 +41,25 @@ jobs:
             - name: Configure Docker for Artifact Registry
               run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
-            - name: Build Docker image
+            - name: Build and Push Docker image
               run: |
+                SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
+                IMAGE_TAG="prod-${SHORT_SHA}"
+                
                 docker build \
-                    --tag ${{ steps.meta.outputs.full_image }} \
-                    --tag ${{ steps.meta.outputs.latest_image }} \
+                    --tag ${{ env.FULL_IMAGE }}:${IMAGE_TAG} \
+                    --tag ${{ env.FULL_IMAGE }}:latest \
                     .
-
-            - name: Push both tags
-              run: |
-                docker push ${{ steps.meta.outputs.full_image }}
-                docker push ${{ steps.meta.outputs.latest_image }}
+                
+                docker push ${{ env.FULL_IMAGE }}:${IMAGE_TAG}
+                docker push ${{ env.FULL_IMAGE }}:latest
+                
+                echo "Pushed: ${{ env.FULL_IMAGE }}:${IMAGE_TAG}"
 
     deploy-production:
         name: Deploy to Production Cloud Run
         runs-on: ubuntu-latest
         needs: build-and-push
-        if: needs.build-and-push.result == 'success'
 
         steps:
             - name: Authenticate to Google Cloud
@@ -93,63 +67,36 @@ jobs:
               with:
                 credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-            - name: Resolve image to deploy
-              id: resolve
-              run: |
-                if [ -n "${{ github.event.inputs.image_tag }}" ]; then
-                    FULL_IMAGE="us-central1-docker.pkg.dev/qwiklabs-gcp-00-717178dcf90e/backend-images/fastapi-app:${{ github.event.inputs.image_tag }}"
-                    echo "DEPLOYING ROLLBACK IMAGE: ${FULL_IMAGE}"
-                else
-                    FULL_IMAGE="${{ needs.build-and-push.outputs.full_image }}"
-                    echo "DEPLOYING NEW IMAGE: ${FULL_IMAGE}"
-                fi
-                echo "full_image=${FULL_IMAGE}" >> $GITHUB_OUTPUT
-
-            - name: Debug image value
-              run: |
-                echo "Image to deploy: ${{ steps.resolve.outputs.full_image }}"
-
             - name: Deploy to Cloud Run
               id: deploy
               uses: google-github-actions/deploy-cloudrun@v2
               with:
                 service: ${{ env.CLOUD_RUN_SERVICE }}
                 region: ${{ env.CLOUD_RUN_REGION }}
-                image: ${{ steps.resolve.outputs.full_image }}
-                flags: |
-                    --allow-unauthenticated
-                    --port=8080
-                    --memory=512Mi
-                    --cpu=1
-                    --min-instances=1
-                    --max-instances=10
+                image: ${{ env.FULL_IMAGE }}:latest
 
-            - name: Health check after deploy
+            - name: Health check
               id: healthcheck
               run: |
                 SERVICE_URL="${{ steps.deploy.outputs.url }}"
-                echo "Checking health at: ${SERVICE_URL}/health"
+                echo "Checking: ${SERVICE_URL}/health"
 
                 for i in {1..5}; do
                     HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${SERVICE_URL}/health")
                     echo "Attempt ${i}: HTTP ${HTTP_STATUS}"
                     if [ "${HTTP_STATUS}" = "200" ]; then
                         echo "Health check passed!"
-                        echo "healthy=true" >> $GITHUB_OUTPUT
                         exit 0
                     fi
                     sleep 10
                 done
 
-                echo "Health check FAILED after 5 attempts"
-                echo "healthy=false" >> $GITHUB_OUTPUT
+                echo "Health check FAILED"
                 exit 1
 
-            - name: Auto-rollback on health check failure
-              if: failure() && steps.healthcheck.outputs.healthy == 'false'
+            - name: Auto-rollback on failure
+              if: failure()
               run: |
-                echo "Health check failed. Rolling back to previous revision..."
-
                 PREV_REVISION=$(gcloud run revisions list \
                     --service=${{ env.CLOUD_RUN_SERVICE }} \
                     --region=${{ env.CLOUD_RUN_REGION }} \
@@ -163,12 +110,9 @@ jobs:
                     --region=${{ env.CLOUD_RUN_REGION }} \
                     --to-revisions="${PREV_REVISION}=100"
 
-                echo "Rollback complete"
-
-            - name: Post deploy summary
+            - name: Summary
               if: always()
               run: |
                 echo "### Backend Deploy Result" >> $GITHUB_STEP_SUMMARY
-                echo "Image: ${{ steps.resolve.outputs.full_image }}" >> $GITHUB_STEP_SUMMARY
+                echo "Image: ${{ env.FULL_IMAGE }}:latest" >> $GITHUB_STEP_SUMMARY
                 echo "URL: ${{ steps.deploy.outputs.url }}" >> $GITHUB_STEP_SUMMARY
-                echo "Health: ${{ steps.healthcheck.outputs.healthy }}" >> $GITHUB_STEP_SUMMARY
