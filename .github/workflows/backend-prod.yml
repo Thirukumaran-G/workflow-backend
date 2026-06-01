@@ -32,6 +32,8 @@ jobs:
                 cache: 'pip'
             - run: pip install -r requirements.txt
             - run: pytest -v --tb=short
+              env:
+                PYTHONPATH: ${{ github.workspace }}
     
     build-and-push:
         name: Build & Push Production Image
