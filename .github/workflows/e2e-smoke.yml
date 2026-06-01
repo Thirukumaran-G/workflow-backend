@@ -1,0 +1,63 @@
+name: E2E Smoke Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      backend_url:
+        description: 'Backend URL to test'
+        required: true
+      frontend_url:
+        description: 'Frontend URL to test'
+        required: true
+
+jobs:
+  smoke-tests:
+    name: Smoke Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Test backend /health
+        id: backend_health
+        run: |
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ github.event.inputs.backend_url }}/health")
+          echo "Status: ${HTTP_STATUS}"
+          if [ "${HTTP_STATUS}" != "200" ]; then
+            echo "result=FAILED" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          echo "result=PASSED" >> $GITHUB_OUTPUT
+
+      - name: Test backend /api/items
+        id: backend_items
+        run: |
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ github.event.inputs.backend_url }}/api/items")
+          echo "Status: ${HTTP_STATUS}"
+          if [ "${HTTP_STATUS}" != "200" ]; then
+            echo "result=FAILED" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          echo "result=PASSED" >> $GITHUB_OUTPUT
+
+      - name: Test frontend loads
+        id: frontend_load
+        run: |
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ github.event.inputs.frontend_url }}")
+          echo "Status: ${HTTP_STATUS}"
+          if [ "${HTTP_STATUS}" != "200" ]; then
+            echo "result=FAILED" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          echo "result=PASSED" >> $GITHUB_OUTPUT
+
+      - name: Post results to summary
+        if: always()
+        run: |
+          echo "### Smoke Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Test | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Backend /health | ${{ steps.backend_health.outputs.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Backend /api/items | ${{ steps.backend_items.outputs.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Frontend loads | ${{ steps.frontend_load.outputs.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| |" >> $GITHUB_STEP_SUMMARY
+          echo "**Backend:** ${{ github.event.inputs.backend_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Frontend:** ${{ github.event.inputs.frontend_url }}" >> $GITHUB_STEP_SUMMARY
